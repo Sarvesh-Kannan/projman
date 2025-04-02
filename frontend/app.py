@@ -98,7 +98,20 @@ def fetch_project_progress(project_id):
 def fetch_workflow_metrics():
     try:
         response = requests.get(f"{API_URL}/analytics/workflow-metrics")
-        return response.json() if response.status_code == 200 else []
+        if response.status_code == 200:
+            metrics = response.json()
+            # Convert to list format for DataFrame
+            return [{
+                "start_time": datetime.now().isoformat(),
+                "end_time": datetime.now().isoformat(),
+                "tasks_processed": metrics.get("total_tasks", 0),
+                "errors": 0,
+                "total_tasks": metrics.get("total_tasks", 0),
+                "completed_tasks": metrics.get("completed_tasks", 0),
+                "pending_tasks": metrics.get("pending_tasks", 0),
+                "in_progress_tasks": metrics.get("in_progress_tasks", 0)
+            }]
+        return []
     except:
         return []
 
@@ -122,17 +135,35 @@ def create_task(title, description, priority, project_id=None, assigned_to=None,
             "description": description,
             "priority": priority,
             "project_id": project_id,
-            "assigned_to": assigned_to,
-            "due_date": due_date.isoformat() if due_date else None
+            "assigned_to": assigned_to if assigned_to else None,
+            "due_date": due_date.strftime("%Y-%m-%d") if due_date else None,
+            "status": "pending"
         }
         response = requests.post(f"{API_URL}/tasks", json=task_data)
         return response.json() if response.status_code == 200 else None
-    except:
+    except Exception as e:
+        st.error(f"Error creating task: {str(e)}")
         return None
 
 def update_task(task_id, update_data):
-    response = requests.put(f"{API_URL}/tasks/{task_id}", json=update_data)
-    return response.json()
+    try:
+        # Convert date objects to string format
+        if 'due_date' in update_data and update_data['due_date']:
+            if isinstance(update_data['due_date'], datetime):
+                update_data['due_date'] = update_data['due_date'].strftime("%Y-%m-%d")
+        
+        response = requests.put(f"{API_URL}/tasks/{task_id}", json=update_data)
+        return response.json() if response.status_code == 200 else None
+    except Exception as e:
+        st.error(f"Error updating task: {str(e)}")
+        return None
+
+def delete_task(task_id):
+    try:
+        response = requests.delete(f"{API_URL}/tasks/{task_id}")
+        return response.status_code == 200
+    except:
+        return False
 
 def add_task_dependency(task_id, depends_on_id):
     dependency_data = {
@@ -149,6 +180,13 @@ def add_task_comment(task_id, content, author):
     }
     response = requests.post(f"{API_URL}/tasks/{task_id}/comments", json=comment_data)
     return response.json()
+
+def delete_project(project_id):
+    try:
+        response = requests.delete(f"{API_URL}/projects/{project_id}")
+        return response.status_code == 200
+    except:
+        return False
 
 # Sidebar navigation
 st.sidebar.title("Project Management")
@@ -297,29 +335,28 @@ if page == "Dashboard":
 
 # Projects page
 elif page == "Projects":
-    st.title("📋 Projects")
+    st.title("📁 Projects")
     
     # Fetch projects
     projects = fetch_projects()
     
     # Create new project
     with st.expander("Create New Project", expanded=False):
-        col1, col2 = st.columns(2)
-        with col1:
+        with st.form("new_project_form"):
             project_name = st.text_input("Project Name")
             project_description = st.text_area("Project Description")
-        with col2:
             project_priority = st.slider("Priority", 1, 5, 3)
-            if st.button("Create Project"):
+            
+            if st.form_submit_button("Create Project"):
                 if project_name and project_description:
-                    result = create_project(project_name, project_description, project_priority)
-                    if result:
+                    new_project = create_project(project_name, project_description, project_priority)
+                    if new_project:
                         st.success("Project created successfully!")
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.error("Failed to create project")
                 else:
-                    st.error("Please fill in all fields")
+                    st.warning("Please fill in all required fields")
     
     # Display projects
     st.subheader("All Projects")
@@ -338,19 +375,18 @@ elif page == "Projects":
                     """, unsafe_allow_html=True)
                     
                     # Project actions
-                    col1, col2, col3 = st.columns(3)
+                    col1, col2 = st.columns(2)
                     with col1:
                         if st.button(f"View Tasks ({project.get('id', 'N/A')})"):
-                            st.session_state.project_id = project.get('id')
-                            st.session_state.page = "Tasks"
-                            st.experimental_rerun()
+                            st.session_state.view_project = project
+                            st.rerun()
                     with col2:
-                        if st.button(f"Edit Project ({project.get('id', 'N/A')})"):
-                            st.session_state.edit_project = project
-                            st.experimental_rerun()
-                    with col3:
                         if st.button(f"Delete Project ({project.get('id', 'N/A')})"):
-                            st.warning("Project deletion not implemented in this demo")
+                            if delete_project(project.get('id')):
+                                st.success(f"Project {project.get('id')} deleted successfully")
+                                st.rerun()
+                            else:
+                                st.error("Failed to delete project")
                     
                     st.markdown("---")
     else:
@@ -360,27 +396,30 @@ elif page == "Projects":
 elif page == "Tasks":
     st.title("✅ Tasks")
     
-    # Fetch tasks
+    # Fetch tasks and projects
+    projects = fetch_projects()
     project_id = getattr(st.session_state, 'project_id', None)
     tasks = fetch_tasks(project_id=project_id)
     
     # Create new task
     with st.expander("Create New Task", expanded=False):
-        col1, col2 = st.columns(2)
-        with col1:
-            task_title = st.text_input("Task Title")
-            task_description = st.text_area("Task Description")
-            task_priority = st.slider("Priority", 1, 5, 3)
-        with col2:
-            # Project selection
-            projects = fetch_projects()
-            project_options = {p.get("name", "Unknown"): p.get("id") for p in projects if isinstance(p, dict)}
-            selected_project = st.selectbox("Project", options=["None"] + list(project_options.keys()))
+        with st.form("new_task_form"):
+            col1, col2 = st.columns(2)
             
-            task_assigned_to = st.text_input("Assigned To")
-            task_due_date = st.date_input("Due Date")
+            with col1:
+                task_title = st.text_input("Task Title")
+                task_description = st.text_area("Task Description")
+                task_priority = st.slider("Priority", 1, 5, 3)
             
-            if st.button("Create Task"):
+            with col2:
+                # Project selection
+                project_options = {p.get("name", "Unknown"): p.get("id") for p in projects if isinstance(p, dict)}
+                selected_project = st.selectbox("Project", options=["None"] + list(project_options.keys()))
+                
+                task_assigned_to = st.text_input("Assigned To", placeholder="Enter assignee name")
+                task_due_date = st.date_input("Due Date", value=datetime.now())
+            
+            if st.form_submit_button("Create Task"):
                 if task_title and task_description:
                     project_id = project_options.get(selected_project) if selected_project != "None" else None
                     result = create_task(
@@ -393,43 +432,122 @@ elif page == "Tasks":
                     )
                     if result:
                         st.success("Task created successfully!")
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.error("Failed to create task")
                 else:
-                    st.error("Please fill in all required fields")
+                    st.warning("Please fill in all required fields")
     
     # Display tasks
     st.subheader("All Tasks")
     
+    # Filter options
+    col1, col2 = st.columns(2)
+    with col1:
+        status_filter = st.selectbox("Filter by Status", ["All", "pending", "in_progress", "completed"])
+    with col2:
+        project_filter = st.selectbox("Filter by Project", ["All"] + list(project_options.keys()))
+    
     if tasks:
         for task in tasks:
             if isinstance(task, dict):
+                # Apply filters
+                if status_filter != "All" and task.get("status") != status_filter:
+                    continue
+                if project_filter != "All":
+                    task_project_id = task.get("project_id")
+                    if task_project_id != project_options.get(project_filter):
+                        continue
+                
                 with st.container():
+                    # Task card with improved styling
                     st.markdown(f"""
-                        <div class="task-card">
-                            <h3>{task.get('title', 'Unknown')}</h3>
-                            <p>{task.get('description', 'No description')}</p>
-                            <p>Priority: {'⭐' * task.get('priority', 1)}</p>
-                            <p>Status: {task.get('status', 'unknown')}</p>
-                            <p>Assigned to: {task.get('assigned_to', 'Unassigned')}</p>
-                            <p>Due date: {task.get('due_date', 'No due date')}</p>
+                        <div class="task-card" style="border-left: 4px solid {'#4CAF50' if task.get('status') == 'completed' else '#FFA500' if task.get('status') == 'in_progress' else '#2196F3'}">
+                            <h3 style="color: #1a1a1a;">{task.get('title', 'Unknown')}</h3>
+                            <p style="color: #666;">{task.get('description', 'No description')}</p>
+                            <div style="display: flex; justify-content: space-between; margin: 10px 0;">
+                                <span>Priority: {'⭐' * task.get('priority', 1)}</span>
+                                <span style="background-color: {'#4CAF50' if task.get('status') == 'completed' else '#FFA500' if task.get('status') == 'in_progress' else '#2196F3'}; color: white; padding: 2px 8px; border-radius: 4px;">
+                                    {task.get('status', 'unknown').title()}
+                                </span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; margin: 10px 0;">
+                                <span><strong>Assigned to:</strong> {task.get('assigned_to') or 'Unassigned'}</span>
+                                <span><strong>Due date:</strong> {task.get('due_date') or 'No due date'}</span>
+                            </div>
+                            <p><strong>Project:</strong> {next((p.get('name', 'Unknown') for p in projects if p.get('id') == task.get('project_id')), 'No Project')}</p>
                         </div>
                     """, unsafe_allow_html=True)
                     
                     # Task actions
-                    col1, col2, col3 = st.columns(3)
+                    col1, col2, col3, col4 = st.columns(4)
                     with col1:
-                        if st.button(f"Update Status ({task.get('id', 'N/A')})"):
-                            st.session_state.edit_task = task
-                            st.experimental_rerun()
+                        # Update status
+                        new_status = st.selectbox(
+                            "Status",
+                            ["pending", "in_progress", "completed"],
+                            index=["pending", "in_progress", "completed"].index(task.get('status', 'pending')),
+                            key=f"status_{task.get('id')}"
+                        )
+                        if new_status != task.get('status'):
+                            if st.button(f"Update Status ({task.get('id', 'N/A')})"):
+                                updated_task = update_task(task.get('id'), {**task, 'status': new_status})
+                                if updated_task:
+                                    st.success("Status updated successfully!")
+                                    st.rerun()
+                                else:
+                                    st.error("Failed to update status")
+                    
                     with col2:
+                        # Add comment
                         if st.button(f"Add Comment ({task.get('id', 'N/A')})"):
-                            st.session_state.comment_task = task
-                            st.experimental_rerun()
+                            with st.form(f"comment_form_{task.get('id')}"):
+                                comment_text = st.text_area("Comment")
+                                comment_author = st.text_input("Your Name")
+                                if st.form_submit_button("Submit Comment"):
+                                    if comment_text and comment_author:
+                                        result = add_task_comment(task.get('id'), comment_text, comment_author)
+                                        if result:
+                                            st.success("Comment added successfully!")
+                                            st.rerun()
+                                        else:
+                                            st.error("Failed to add comment")
+                                    else:
+                                        st.warning("Please fill in all fields")
+                    
                     with col3:
+                        # Edit task
+                        if st.button(f"Edit Task ({task.get('id', 'N/A')})"):
+                            with st.form(f"edit_form_{task.get('id')}"):
+                                edited_title = st.text_input("Title", value=task.get('title', ''))
+                                edited_description = st.text_area("Description", value=task.get('description', ''))
+                                edited_priority = st.slider("Priority", 1, 5, task.get('priority', 3))
+                                edited_assigned_to = st.text_input("Assigned To", value=task.get('assigned_to', ''))
+                                edited_due_date = st.date_input("Due Date", value=datetime.strptime(task.get('due_date', datetime.now().strftime('%Y-%m-%d')), '%Y-%m-%d').date() if task.get('due_date') else datetime.now())
+                                
+                                if st.form_submit_button("Save Changes"):
+                                    updated_task = update_task(task.get('id'), {
+                                        **task,
+                                        'title': edited_title,
+                                        'description': edited_description,
+                                        'priority': edited_priority,
+                                        'assigned_to': edited_assigned_to,
+                                        'due_date': edited_due_date.isoformat()
+                                    })
+                                    if updated_task:
+                                        st.success("Task updated successfully!")
+                                        st.rerun()
+                                    else:
+                                        st.error("Failed to update task")
+                    
+                    with col4:
+                        # Delete task
                         if st.button(f"Delete Task ({task.get('id', 'N/A')})"):
-                            st.warning("Task deletion not implemented in this demo")
+                            if delete_task(task.get('id')):
+                                st.success(f"Task {task.get('id')} deleted successfully")
+                                st.rerun()
+                            else:
+                                st.error("Failed to delete task")
                     
                     st.markdown("---")
     else:
@@ -446,7 +564,8 @@ elif page == "Dependencies":
         # Task selection
         col1, col2 = st.columns(2)
         with col1:
-            task_options = {f"{t.get('id', '')} - {t.get('title', 'Unknown')}": t.get('id') for t in tasks if isinstance(t, dict) and t.get('id')}
+            task_options = {f"{t.get('id', '')} - {t.get('title', 'Unknown')}": t.get('id') 
+                          for t in tasks if isinstance(t, dict) and t.get('id')}
             if task_options:
                 selected_task = st.selectbox("Select Task", options=list(task_options.keys()))
                 task_id = task_options.get(selected_task)
@@ -469,41 +588,54 @@ elif page == "Dependencies":
                 dependency_id = None
         
         if task_id and dependency_id and st.button("Add Dependency"):
-            add_task_dependency(task_id, dependency_id)
-            st.success(f"Dependency added: Task {task_id} depends on Task {dependency_id}")
+            try:
+                result = add_task_dependency(task_id, dependency_id)
+                if result:
+                    st.success(f"Dependency added: Task {task_id} depends on Task {dependency_id}")
+                    st.rerun()
+                else:
+                    st.error("Failed to add dependency")
+            except Exception as e:
+                st.error(f"Error adding dependency: {str(e)}")
         
         # Display dependency graph
         st.subheader("Dependency Graph")
         
-        # Create a simple visualization of dependencies
-        import networkx as nx
-        import matplotlib.pyplot as plt
-        
-        G = nx.DiGraph()
-        
-        # Add nodes
-        for task in tasks:
-            G.add_node(task['id'], title=task['title'])
-        
-        # Add edges (dependencies)
-        for task in tasks:
-            try:
-                dependencies = requests.get(f"{API_URL}/tasks/{task['id']}/dependencies").json()
-                for dep in dependencies:
-                    G.add_edge(dep['depends_on_id'], task['id'])
-            except:
-                pass
-        
-        # Create the graph visualization
-        fig, ax = plt.subplots(figsize=(10, 6))
-        pos = nx.spring_layout(G)
-        nx.draw(G, pos, with_labels=True, node_color='lightblue', 
-                node_size=1000, font_size=8, font_weight='bold', 
-                arrows=True, ax=ax)
-        
-        st.pyplot(fig)
+        try:
+            # Create a simple visualization of dependencies
+            import networkx as nx
+            import matplotlib.pyplot as plt
+            
+            G = nx.DiGraph()
+            
+            # Add nodes
+            for task in tasks:
+                if isinstance(task, dict) and task.get('id'):
+                    G.add_node(task['id'], title=task.get('title', 'Unknown'))
+            
+            # Add edges (dependencies)
+            for task in tasks:
+                if isinstance(task, dict) and task.get('id'):
+                    try:
+                        dependencies = requests.get(f"{API_URL}/tasks/{task['id']}/dependencies").json()
+                        for dep in dependencies:
+                            if isinstance(dep, dict) and dep.get('depends_on_id'):
+                                G.add_edge(dep['depends_on_id'], task['id'])
+                    except:
+                        continue
+            
+            # Create the graph visualization
+            fig, ax = plt.subplots(figsize=(10, 6))
+            pos = nx.spring_layout(G)
+            nx.draw(G, pos, with_labels=True, node_color='lightblue', 
+                    node_size=1000, font_size=8, font_weight='bold', 
+                    arrows=True, ax=ax)
+            
+            st.pyplot(fig)
+        except Exception as e:
+            st.error(f"Error creating dependency graph: {str(e)}")
     else:
-        st.info("No tasks found. Create tasks to manage dependencies.")
+        st.info("No tasks found. Create at least two tasks to manage dependencies.")
 
 # Analytics page
 elif page == "Analytics":
@@ -537,21 +669,6 @@ elif page == "Analytics":
             title="Task Status Distribution"
         )
         st.plotly_chart(fig, use_container_width=True)
-        
-        # Task completion over time
-        if "completed_at" in tasks_df.columns and not tasks_df["completed_at"].isna().all():
-            tasks_df["completed_at"] = pd.to_datetime(tasks_df["completed_at"])
-            tasks_df["completion_date"] = tasks_df["completed_at"].dt.date
-            
-            completion_counts = tasks_df.groupby("completion_date").size().reset_index(name="count")
-            
-            fig = px.line(
-                completion_counts,
-                x="completion_date",
-                y="count",
-                title="Task Completions Over Time"
-            )
-            st.plotly_chart(fig, use_container_width=True)
     
     # Project metrics
     st.subheader("Project Metrics")
@@ -560,24 +677,26 @@ elif page == "Analytics":
         # Project progress
         project_progress = []
         for project in projects:
-            progress = fetch_project_progress(project["id"])
-            project_progress.append({
-                "Project": project["name"],
-                "Progress": progress["progress"],
-                "Completed": progress["completed"],
-                "Total": progress["total"]
-            })
+            if isinstance(project, dict) and project.get('id'):
+                progress = fetch_project_progress(project["id"])
+                project_progress.append({
+                    "Project": project.get("name", "Unknown"),
+                    "Progress": progress.get("progress", 0),
+                    "Completed": progress.get("completed", 0),
+                    "Total": progress.get("total", 0)
+                })
         
-        progress_df = pd.DataFrame(project_progress)
-        
-        fig = px.bar(
-            progress_df,
-            x="Project",
-            y=["Completed", "Total"],
-            title="Project Task Completion",
-            barmode="group"
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        if project_progress:
+            progress_df = pd.DataFrame(project_progress)
+            
+            fig = px.bar(
+                progress_df,
+                x="Project",
+                y=["Completed", "Total"],
+                title="Project Task Completion",
+                barmode="group"
+            )
+            st.plotly_chart(fig, use_container_width=True)
     
     # Workflow metrics
     st.subheader("Workflow Metrics")

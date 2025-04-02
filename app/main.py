@@ -30,6 +30,8 @@ class Task(BaseModel):
     priority: int
     status: str = "pending"
     project_id: Optional[int] = None
+    assigned_to: Optional[str] = None
+    due_date: Optional[str] = None
 
 # In-memory storage for demo
 projects = []
@@ -65,6 +67,18 @@ async def update_project(project_id: int, project: Project):
             return project
     raise HTTPException(status_code=404, detail="Project not found")
 
+@app.delete("/projects/{project_id}")
+async def delete_project(project_id: int):
+    for i, project in enumerate(projects):
+        if project.id == project_id:
+            # Remove all tasks associated with this project
+            global tasks
+            tasks = [task for task in tasks if task.project_id != project_id]
+            # Remove the project
+            projects.pop(i)
+            return {"message": f"Project {project_id} deleted successfully"}
+    raise HTTPException(status_code=404, detail="Project not found")
+
 @app.get("/tasks", response_model=List[Task])
 async def get_tasks(project_id: Optional[int] = None, status: Optional[str] = None):
     if project_id is not None:
@@ -87,6 +101,24 @@ async def update_task(task_id: int, task: Task):
             tasks[i] = task
             return task
     raise HTTPException(status_code=404, detail="Task not found")
+
+@app.delete("/tasks/{task_id}")
+async def delete_task(task_id: int):
+    for i, task in enumerate(tasks):
+        if task.id == task_id:
+            tasks.pop(i)
+            return {"message": f"Task {task_id} deleted successfully"}
+    raise HTTPException(status_code=404, detail="Task not found")
+
+@app.get("/tasks/{task_id}/comments", response_model=List[dict])
+async def get_task_comments(task_id: int):
+    # In a real app, this would fetch from a database
+    return []
+
+@app.post("/tasks/{task_id}/comments")
+async def add_task_comment(task_id: int, comment: dict):
+    # In a real app, this would save to a database
+    return comment
 
 @app.get("/analytics/project-progress/{project_id}")
 async def get_project_progress(project_id: int):
